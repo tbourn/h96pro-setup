@@ -6,9 +6,9 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "[!] Run as root (sudo -i or sudo bash h96-setup.sh)"; exit 1
 fi
 
-# ========= Configuration =========
+# ========= Config =========
 : "${TZ:=Europe/Athens}"
-: "${IFACE:=eth0}"                    # Ethernet only on H96 Armbian
+: "${IFACE:=eth0}"
 : "${HOST_IP:=192.168.1.60}"
 : "${CIDR:=24}"
 : "${GATEWAY:=192.168.1.1}"
@@ -18,12 +18,12 @@ fi
 : "${USB_PART:=/dev/sda1}"
 
 echo "[i] IFACE=$IFACE HOST_IP=$HOST_IP/$CIDR GW=$GATEWAY TZ=$TZ"
-echo "[i] WireGuard: $WG_ADDR subnet=$WG_NET port=$WG_PORT"
+echo "[i] WG: $WG_ADDR subnet=$WG_NET port=$WG_PORT"
 echo "[i] USB_PART=$USB_PART"
 
-# ========= USB sanity checks =========
+# ========= USB check =========
 if ! lsblk -no FSTYPE "$USB_PART" >/dev/null 2>&1; then
-  echo "[!] USB partition $USB_PART not found. Try: lsblk -o NAME,RM,SIZE,FSTYPE,MOUNTPOINT,TRAN"; exit 1
+  echo "[!] USB partition $USB_PART not found. Use: lsblk -o NAME,RM,SIZE,FSTYPE,MOUNTPOINT,TRAN"; exit 1
 fi
 USB_FS="$(lsblk -no FSTYPE "$USB_PART")"
 USB_UUID="$(blkid -s UUID -o value "$USB_PART" || true)"
@@ -36,16 +36,13 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y curl gnupg2 ca-certificates lsb-release openssl \
   zram-tools smartmontools ldnsutils \
-  nginx fail2ban unbound wireguard wireguard-tools \
+  nginx lighttpd fail2ban unbound unbound-anchor wireguard wireguard-tools \
   iptables-persistent
-
-# Try to install unbound-anchor (optional on Armbian)
-apt-get install -y unbound-anchor || true
 
 timedatectl set-timezone "$TZ" || true
 systemctl enable --now ssh
 
-# ========= Netplan (renderer: NetworkManager) =========
+# ========= Netplan (NetworkManager) =========
 echo "[i] Writing Netplan config..."
 mkdir -p /etc/netplan
 cat >/etc/netplan/01-static.yaml <<EOF
@@ -62,16 +59,13 @@ network:
         addresses: [127.0.0.1,1.1.1.1]
 EOF
 chmod 600 /etc/netplan/01-static.yaml
-
-# Fix Armbian default netplan if it has bad/empty renderer
 if [[ -f /etc/netplan/armbian-default.yaml ]]; then
   sed -i 's/renderer: .*/renderer: NetworkManager/' /etc/netplan/armbian-default.yaml || true
   chmod 600 /etc/netplan/armbian-default.yaml || true
 fi
-
 netplan apply
 
-# ========= Free port 53 (skip if systemd-resolved not present) =========
+# ========= Free port 53 if resolved exists =========
 if systemctl list-unit-files | grep -q '^systemd-resolved.service'; then
   if grep -q '^#\?DNSStubListener' /etc/systemd/resolved.conf 2>/dev/null; then
     sed -i 's/^#\?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
@@ -80,10 +74,9 @@ if systemctl list-unit-files | grep -q '^systemd-resolved.service'; then
   fi
   systemctl restart systemd-resolved || true
 else
-  echo "[i] systemd-resolved not present on this image; skipping."
+  echo "[i] systemd-resolved not present; skipping."
 fi
-# Temporary resolver until Pi-hole is ready
-echo "nameserver 1.1.1.1" > /etc/resolv.conf
+echo "nameserver 1.1.1.1" > /etc/resolv.conf  # temporary until Pi-hole is up
 
 # ========= Unbound (127.0.0.1:5335) =========
 mkdir -p /etc/unbound/unbound.conf.d
@@ -104,14 +97,9 @@ forward-zone:
   forward-addr: 1.0.0.1@853#cloudflare-dns.com
 CONF
 
-# Trust anchor refresh (if tool exists)
-if command -v unbound-anchor >/dev/null 2>&1; then
-  rm -f /var/lib/unbound/root.key || true
-  unbound-anchor -a /var/lib/unbound/root.key || true
-else
-  echo "[i] unbound-anchor not available; skipping trust-anchor refresh."
-fi
-
+# Trust anchor refresh (ok to skip if it fails)
+rm -f /var/lib/unbound/root.key || true
+(unbound-anchor -a /var/lib/unbound/root.key || true)
 unbound-checkconf /etc/unbound/unbound.conf.d/pi-hole.conf
 systemctl enable --now unbound
 systemctl restart unbound
@@ -122,6 +110,14 @@ if ! command -v pihole >/dev/null 2>&1; then
   PIHOLE_SKIP_OS_CHECK=true bash /tmp/install.sh --unattended
 fi
 
+# Ensure Lighttpd is present & move to 8081
+systemctl enable --now lighttpd || true
+if [[ -f /etc/lighttpd/lighttpd.conf ]]; then
+  sed -i 's/^\s*server\.port\s*=.*/server.port = 8081/' /etc/lighttpd/lighttpd.conf
+  systemctl restart lighttpd || true
+fi
+
+# Point Pi-hole upstream to Unbound + ensure iface/IP
 SETUPVARS="/etc/pihole/setupVars.conf"
 touch "$SETUPVARS"
 grep -q '^PIHOLE_INTERFACE=' "$SETUPVARS" || echo "PIHOLE_INTERFACE=${IFACE}" >>"$SETUPVARS"
@@ -131,19 +127,13 @@ echo "PIHOLE_DNS_1=127.0.0.1#5335" >>"$SETUPVARS"
 grep -q '^WEBPASSWORD=' "$SETUPVARS" || echo "WEBPASSWORD=$(openssl rand -hex 16)" >>"$SETUPVARS"
 pihole restartdns || true
 
-# Move lighttpd to 8081 (Nginx will be on :80)
-if [[ -f /etc/lighttpd/lighttpd.conf ]]; then
-  sed -i 's/^\s*server\.port\s*=.*/server.port = 8081/' /etc/lighttpd/lighttpd.conf
-fi
-systemctl restart lighttpd || true
-
 # ========= USB persistence (bind mounts) =========
 USB_MNT="/srv/edge-usb"
 mkdir -p "$USB_MNT"
 grep -q "$USB_UUID" /etc/fstab || echo "UUID=$USB_UUID $USB_MNT $USB_FS noatime,nodiratime,defaults 0 2" >>/etc/fstab
 mountpoint -q "$USB_MNT" || mount "$USB_MNT"
 
-# Structure on USB
+# Folders on USB
 mkdir -p "$USB_MNT"/{pihole,wireguard,homer,apt-cache,logs,logs/lighttpd,logs/nginx}
 
 # Stop services before moving
@@ -152,7 +142,7 @@ systemctl stop lighttpd || true
 systemctl stop nginx || true
 systemctl stop wg-quick@wg0 || true
 
-# Copy existing data
+# Copy data to USB (ignore if src empty)
 rsync -aHAX --delete /etc/pihole/     "$USB_MNT/pihole/"     || true
 rsync -aHAX --delete /etc/wireguard/  "$USB_MNT/wireguard/"  || true
 rsync -aHAX --delete /var/www/homer/  "$USB_MNT/homer/"      || true
@@ -164,10 +154,9 @@ add_bind "$USB_MNT/pihole"     /etc/pihole
 add_bind "$USB_MNT/wireguard"  /etc/wireguard
 add_bind "$USB_MNT/homer"      /var/www/homer
 add_bind "$USB_MNT/apt-cache"  /var/cache/apt
-
 mount -a
 
-# ========= Nginx + Homer (logs to USB) =========
+# ========= Nginx + Homer (logs → USB) =========
 rm -f /etc/nginx/sites-enabled/default
 cat >/etc/nginx/sites-available/edge <<NGX
 server {
@@ -197,7 +186,7 @@ server {
 NGX
 ln -sf /etc/nginx/sites-available/edge /etc/nginx/sites-enabled/edge
 
-# Fetch Homer (static) if not present
+# Homer static (first install)
 mkdir -p /var/www/homer
 if [[ ! -f /var/www/homer/index.html ]]; then
   URL=$(curl -s https://api.github.com/repos/bastienwirtz/homer/releases/latest | grep browser_download_url | grep -m1 tar.gz | cut -d\" -f4)
@@ -219,12 +208,11 @@ links:
     url: http://192.168.1.50:32400/web
 YML
 
-# ========= Pi-hole logs → USB; lighttpd logs → USB =========
+# Pi-hole & Lighttpd logs → USB
 mkdir -p /etc/pihole/logs
 FTL_CONF="/etc/pihole/pihole-FTL.conf"
 grep -q '^LOGFILE=' "$FTL_CONF" 2>/dev/null && sed -i '/^LOGFILE=/d' "$FTL_CONF" || true
 echo "LOGFILE=/etc/pihole/logs/pihole-FTL.log" >> "$FTL_CONF"
-
 LTPD_CONF="/etc/lighttpd/lighttpd.conf"
 if [[ -f "$LTPD_CONF" ]]; then
   grep -q '^accesslog\.filename' "$LTPD_CONF" \
@@ -235,7 +223,7 @@ if [[ -f "$LTPD_CONF" ]]; then
     || echo "server.errorlog = \"$USB_MNT/logs/lighttpd/error.log\"" >> "$LTPD_CONF"
 fi
 
-# ========= Fail2Ban (read Nginx logs from USB path) =========
+# ========= Fail2Ban (read Nginx logs from USB) =========
 mkdir -p /etc/fail2ban/jail.d
 cat >/etc/fail2ban/jail.d/nginx-usb.conf <<EOF
 [nginx-http-auth]
@@ -250,7 +238,7 @@ logpath = $USB_MNT/logs/nginx/access.log
 enabled = true
 EOF
 
-# ========= WireGuard =========
+# ========= WireGuard base =========
 mkdir -p /etc/wireguard
 umask 077
 [[ -f /etc/wireguard/server.key ]] || wg genkey | tee /etc/wireguard/server.key | wg pubkey >/etc/wireguard/server.pub
@@ -273,24 +261,23 @@ iptables -t nat -C POSTROUTING -s $WG_NET -o $IFACE -j MASQUERADE 2>/dev/null ||
 iptables -t nat -A POSTROUTING -s $WG_NET -o $IFACE -j MASQUERADE
 netfilter-persistent save
 
-# ========= Bring services up =========
+# ========= Bring up services =========
 systemctl restart unbound
 systemctl restart lighttpd
+pihole restartdns || true
 systemctl restart fail2ban
 systemctl enable --now wg-quick@wg0
 systemctl restart nginx
 
-# Local resolver → Pi-hole
+# Use Pi-hole locally
 echo "nameserver 127.0.0.1" >/etc/resolv.conf || true
 
 echo
 echo "============================================================"
 echo "[✓] Setup complete."
-echo "SSH:               ssh $(id -un)@$HOST_IP"
-echo "Homer dashboard:   http://$HOST_IP"
-echo "Pi-hole admin:     http://$HOST_IP/pihole  (or /admin)"
-echo "DNS on *your device*: set DNS to $HOST_IP to block ads"
-echo "WireGuard (LAN):   UDP $WG_PORT on $HOST_IP (needs port-forward upstream for remote use)"
-echo "USB mounts:        $USB_MNT -> /etc/pihole, /etc/wireguard, /var/www/homer, /var/cache/apt"
-echo "Logs on USB:       $USB_MNT/logs/nginx/*, $USB_MNT/logs/lighttpd/*, /etc/pihole/logs/pihole-FTL.log"
+echo "Homer:            http://$HOST_IP"
+echo "Pi-hole admin:    http://$HOST_IP/pihole  (or /admin)"
+echo "Set DNS on device to: $HOST_IP"
+echo "USB mounts:       /srv/edge-usb -> /etc/pihole, /etc/wireguard, /var/www/homer, /var/cache/apt"
+echo "WG server (LAN):  UDP $WG_PORT on $HOST_IP (port-forward upstream if remote access)"
 echo "============================================================"
