@@ -21,7 +21,7 @@ On the H96 (Armbian):
 ```bash
 sudo apt-get update -y && sudo apt-get install -y git
 git clone https://github.com/tbourn/h96pro-setup.git
-cd h96-edge
+cd h96pro-setup
 chmod +x h96-setup.sh
 
 # Run with your actual values:
