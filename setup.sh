@@ -8,14 +8,14 @@ fi
 
 # ========= Configuration =========
 : "${TZ:=Europe/Athens}"
-: "${IFACE:=eth0}"                    # H96 Armbian = Ethernet only
-: "${HOST_IP:=192.168.1.60}"          # static IP for this box
-: "${CIDR:=24}"                       # subnet bits (24 = 255.255.255.0)
-: "${GATEWAY:=192.168.1.1}"           # upstream router/gateway
-: "${WG_NET:=10.13.13.0/24}"          # WireGuard subnet
-: "${WG_ADDR:=10.13.13.1/24}"         # WireGuard server IP
-: "${WG_PORT:=51820}"                 # WireGuard port
-: "${USB_PART:=/dev/sda1}"            # USB partition for persistence (ext4)
+: "${IFACE:=eth0}"                    # Ethernet only on H96 Armbian
+: "${HOST_IP:=192.168.1.60}"
+: "${CIDR:=24}"
+: "${GATEWAY:=192.168.1.1}"
+: "${WG_NET:=10.13.13.0/24}"
+: "${WG_ADDR:=10.13.13.1/24}"
+: "${WG_PORT:=51820}"
+: "${USB_PART:=/dev/sda1}"
 
 echo "[i] IFACE=$IFACE HOST_IP=$HOST_IP/$CIDR GW=$GATEWAY TZ=$TZ"
 echo "[i] WireGuard: $WG_ADDR subnet=$WG_NET port=$WG_PORT"
@@ -23,7 +23,7 @@ echo "[i] USB_PART=$USB_PART"
 
 # ========= USB sanity checks =========
 if ! lsblk -no FSTYPE "$USB_PART" >/dev/null 2>&1; then
-  echo "[!] USB partition $USB_PART not found. Run: lsblk -o NAME,RM,SIZE,FSTYPE,MOUNTPOINT,TRAN"; exit 1
+  echo "[!] USB partition $USB_PART not found. Try: lsblk -o NAME,RM,SIZE,FSTYPE,MOUNTPOINT,TRAN"; exit 1
 fi
 USB_FS="$(lsblk -no FSTYPE "$USB_PART")"
 USB_UUID="$(blkid -s UUID -o value "$USB_PART" || true)"
@@ -42,7 +42,7 @@ apt-get install -y curl gnupg2 ca-certificates lsb-release openssl \
 timedatectl set-timezone "$TZ" || true
 systemctl enable --now ssh
 
-# ========= Static IP with Netplan (renderer: NetworkManager) =========
+# ========= Netplan (renderer: NetworkManager) =========
 echo "[i] Writing Netplan config..."
 mkdir -p /etc/netplan
 cat >/etc/netplan/01-static.yaml <<EOF
@@ -59,8 +59,13 @@ network:
         addresses: [127.0.0.1,1.1.1.1]
 EOF
 chmod 600 /etc/netplan/01-static.yaml
-# tighten default file if present (silence warnings)
-[[ -f /etc/netplan/armbian-default.yaml ]] && chmod 600 /etc/netplan/armbian-default.yaml || true
+
+# Fix Armbian default netplan if it has bad renderer
+if [[ -f /etc/netplan/armbian-default.yaml ]]; then
+  sed -i 's/renderer: .*/renderer: NetworkManager/' /etc/netplan/armbian-default.yaml || true
+  chmod 600 /etc/netplan/armbian-default.yaml || true
+fi
+
 netplan apply
 
 # ========= Free port 53 (disable systemd-resolved stub) =========
@@ -70,7 +75,7 @@ else
   echo "DNSStubListener=no" >> /etc/systemd/resolved.conf
 fi
 systemctl restart systemd-resolved || true
-# Use a public resolver until Pi-hole is ready
+# Temporary resolver until Pi-hole is ready
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
 # ========= Unbound (127.0.0.1:5335) =========
@@ -91,6 +96,7 @@ forward-zone:
   forward-addr: 1.1.1.1@853#cloudflare-dns.com
   forward-addr: 1.0.0.1@853#cloudflare-dns.com
 CONF
+
 # Trust anchor refresh + start
 rm -f /var/lib/unbound/root.key || true
 unbound-anchor -a /var/lib/unbound/root.key || true
@@ -107,7 +113,7 @@ fi
 SETUPVARS="/etc/pihole/setupVars.conf"
 touch "$SETUPVARS"
 grep -q '^PIHOLE_INTERFACE=' "$SETUPVARS" || echo "PIHOLE_INTERFACE=${IFACE}" >>"$SETUPVARS"
-grep -q '^IPV4_ADDRESS=' "$SETUPVARS"   || echo "IPV4_ADDRESS=${HOST_IP}/${CIDR}" >>"$SETUPVARS"
+grep -q '^IPV4_ADDRESS='   "$SETUPVARS" || echo "IPV4_ADDRESS=${HOST_IP}/${CIDR}" >>"$SETUPVARS"
 sed -i '/^PIHOLE_DNS_/d' "$SETUPVARS"
 echo "PIHOLE_DNS_1=127.0.0.1#5335" >>"$SETUPVARS"
 grep -q '^WEBPASSWORD=' "$SETUPVARS" || echo "WEBPASSWORD=$(openssl rand -hex 16)" >>"$SETUPVARS"
@@ -262,7 +268,7 @@ systemctl restart fail2ban
 systemctl enable --now wg-quick@wg0
 systemctl restart nginx
 
-# Point local resolver to Pi-hole
+# Local resolver → Pi-hole
 echo "nameserver 127.0.0.1" >/etc/resolv.conf || true
 
 echo
