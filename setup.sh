@@ -23,7 +23,7 @@ fi
 USB_FS="$(lsblk -no FSTYPE "$USB_PART")"
 USB_UUID="$(blkid -s UUID -o value "$USB_PART" || true)"
 if [[ -z "$USB_UUID" ]]; then
-  echo "[!] $USB_PART has no UUID. If empty, format once: sudo mkfs.ext4 -L EDGEUSB $USB_PART"; exit 1
+  echo "[!] $USB_PART has no UUID. If empty, format once: mkfs.ext4 -L EDGEUSB $USB_PART"; exit 1
 fi
 
 # ========= Base packages =========
@@ -32,10 +32,10 @@ apt-get update -y
 apt-get install -y curl gnupg2 ca-certificates lsb-release openssl \
   zram-tools smartmontools ldnsutils \
   nginx fail2ban unbound wireguard wireguard-tools \
-  iptables-persistent git
+  iptables-persistent
 
+timedatectl set-timezone "$TZ" || true
 systemctl enable --now ssh
-systemctl enable --now unbound
 
 # ========= Static IP with Netplan (eth0) =========
 echo "[i] Writing Netplan config..."
@@ -55,7 +55,19 @@ network:
 EOF
 netplan apply
 
+# ========= Free port 53 (disable resolved stub) =========
+mkdir -p /etc/systemd/resolved.conf.d
+if grep -q '^#\?DNSStubListener' /etc/systemd/resolved.conf 2>/dev/null; then
+  sed -i 's/^#\?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+else
+  echo "DNSStubListener=no" >> /etc/systemd/resolved.conf
+fi
+systemctl restart systemd-resolved || true
+# temporary resolver while Pi-hole not ready
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+
 # ========= Unbound (127.0.0.1:5335) =========
+mkdir -p /etc/unbound/unbound.conf.d
 cat >/etc/unbound/unbound.conf.d/pi-hole.conf <<'CONF'
 server:
   verbosity: 1
@@ -72,12 +84,12 @@ forward-zone:
   forward-addr: 1.1.1.1@853#cloudflare-dns.com
   forward-addr: 1.0.0.1@853#cloudflare-dns.com
 CONF
-systemctl restart unbound
 
-# ========= Free port 53 (disable resolved stub) =========
-sed -i 's/^#\?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf || true
-systemctl restart systemd-resolved || true
-echo "nameserver 1.1.1.1" >/etc/resolv.conf
+# Ensure trust anchors exist
+rm -f /var/lib/unbound/root.key || true
+unbound-anchor -a /var/lib/unbound/root.key || true
+systemctl enable --now unbound
+systemctl restart unbound
 
 # ========= Pi-hole (unattended) =========
 if ! command -v pihole >/dev/null 2>&1; then
@@ -89,7 +101,7 @@ SETUPVARS="/etc/pihole/setupVars.conf"
 touch "$SETUPVARS"
 # ensure interface + IP are set
 grep -q '^PIHOLE_INTERFACE=' "$SETUPVARS" || echo "PIHOLE_INTERFACE=${IFACE}" >>"$SETUPVARS"
-grep -q '^IPV4_ADDRESS=' "$SETUPVARS" || echo "IPV4_ADDRESS=${HOST_IP}/${CIDR}" >>"$SETUPVARS"
+grep -q '^IPV4_ADDRESS=' "$SETUPVARS"   || echo "IPV4_ADDRESS=${HOST_IP}/${CIDR}" >>"$SETUPVARS"
 # point upstream to Unbound
 sed -i '/^PIHOLE_DNS_/d' "$SETUPVARS"
 echo "PIHOLE_DNS_1=127.0.0.1#5335" >>"$SETUPVARS"
@@ -101,6 +113,7 @@ pihole restartdns || true
 if [[ -f /etc/lighttpd/lighttpd.conf ]]; then
   sed -i 's/^\s*server\.port\s*=.*/server.port = 8081/' /etc/lighttpd/lighttpd.conf
 fi
+systemctl restart lighttpd || true
 
 # ========= USB persistence (bind mounts) =========
 USB_MNT="/srv/edge-usb"

@@ -40,7 +40,7 @@ When it finishes:
 
 ## What the script does
 
-- Installs: `unbound`, `pihole`, `nginx`, `fail2ban`, `wireguard`, `iptables-persistent`, `git`, and utilities
+- Installs: `unbound`, `pihole`, `nginx`, `fail2ban`, `wireguard`, `iptables-persistent`, and utilities
 - Configures **Netplan** static IP on `eth0`
 - Sets **Pi-hole upstream** to **Unbound** at `127.0.0.1#5335`
 - Moves Pi-hole’s embedded web server (**lighttpd**) to **:8081** and proxies via **Nginx :80**
