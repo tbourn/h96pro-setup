@@ -20,12 +20,12 @@ On the H96 (Armbian):
 
 ```bash
 sudo apt-get update -y && sudo apt-get install -y git
-git clone https://github.com/tbourn/h96pro-setup.git
+git clone https://github.com/tbourn/h96pro-setup.gith96-setup
 cd h96pro-setup
-chmod +x h96-setup.sh
+chmod +x setup.sh
 
 # Run with your actual values:
-IFACE=eth0 HOST_IP=192.168.1.60 GATEWAY=192.168.1.1 CIDR=24 USB_PART=/dev/sda1 sudo ./h96-setup.sh
+IFACE=eth0 HOST_IP=192.168.1.60 GATEWAY=192.168.1.1 CIDR=24 USB_PART=/dev/sda1 sudo ./setup.sh
 ```
 
 When it finishes:
