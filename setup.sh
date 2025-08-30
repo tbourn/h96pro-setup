@@ -39,6 +39,9 @@ apt-get install -y curl gnupg2 ca-certificates lsb-release openssl \
   nginx fail2ban unbound wireguard wireguard-tools \
   iptables-persistent
 
+# Try to install unbound-anchor (optional on Armbian)
+apt-get install -y unbound-anchor || true
+
 timedatectl set-timezone "$TZ" || true
 systemctl enable --now ssh
 
@@ -60,7 +63,7 @@ network:
 EOF
 chmod 600 /etc/netplan/01-static.yaml
 
-# Fix Armbian default netplan if it has bad renderer
+# Fix Armbian default netplan if it has bad/empty renderer
 if [[ -f /etc/netplan/armbian-default.yaml ]]; then
   sed -i 's/renderer: .*/renderer: NetworkManager/' /etc/netplan/armbian-default.yaml || true
   chmod 600 /etc/netplan/armbian-default.yaml || true
@@ -68,13 +71,17 @@ fi
 
 netplan apply
 
-# ========= Free port 53 (disable systemd-resolved stub) =========
-if grep -q '^#\?DNSStubListener' /etc/systemd/resolved.conf 2>/dev/null; then
-  sed -i 's/^#\?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+# ========= Free port 53 (skip if systemd-resolved not present) =========
+if systemctl list-unit-files | grep -q '^systemd-resolved.service'; then
+  if grep -q '^#\?DNSStubListener' /etc/systemd/resolved.conf 2>/dev/null; then
+    sed -i 's/^#\?DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+  else
+    echo "DNSStubListener=no" >> /etc/systemd/resolved.conf
+  fi
+  systemctl restart systemd-resolved || true
 else
-  echo "DNSStubListener=no" >> /etc/systemd/resolved.conf
+  echo "[i] systemd-resolved not present on this image; skipping."
 fi
-systemctl restart systemd-resolved || true
 # Temporary resolver until Pi-hole is ready
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
@@ -97,9 +104,14 @@ forward-zone:
   forward-addr: 1.0.0.1@853#cloudflare-dns.com
 CONF
 
-# Trust anchor refresh + start
-rm -f /var/lib/unbound/root.key || true
-unbound-anchor -a /var/lib/unbound/root.key || true
+# Trust anchor refresh (if tool exists)
+if command -v unbound-anchor >/dev/null 2>&1; then
+  rm -f /var/lib/unbound/root.key || true
+  unbound-anchor -a /var/lib/unbound/root.key || true
+else
+  echo "[i] unbound-anchor not available; skipping trust-anchor refresh."
+fi
+
 unbound-checkconf /etc/unbound/unbound.conf.d/pi-hole.conf
 systemctl enable --now unbound
 systemctl restart unbound
